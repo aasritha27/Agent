@@ -23,14 +23,36 @@ const PERIODS = ["8:15-9:05", "9:05-9:55", "10:10-11:00", "11:00-11:50", "11:50-
 const BREAK_AFTER = { 1: "Short break", 4: "Lunch" }; // column index after which a break renders
 
 async function api(path, token, opts = {}) {
-  const res = await fetch(CFG.apiUrl + path, {
-    ...opts,
-    headers: {
-      ...(opts.body && !(opts.body instanceof FormData) ? { "Content-Type": "application/json" } : {}),
-      ...(token ? { Authorization: "Bearer " + token } : {}),
-      ...(opts.headers || {}),
-    },
-  });
+  // Timeout for long requests (/api/solve and /api/chat can take several seconds).
+  // AbortController prevents the bare "Failed to fetch" from a dropped mid-flight
+  // request; a caller-provided opts.signal is honored and extends the ceiling.
+  const timeoutMs = (opts.signal ? 120000 : 60000);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  // Chain the caller's signal (if any) onto ours.
+  const callerSig = opts.signal;
+  const onAbort = () => ctrl.abort();
+  if (callerSig && callerSig.addEventListener) callerSig.addEventListener("abort", onAbort);
+  let res;
+  try {
+    res = await fetch(CFG.apiUrl + path, {
+      ...opts,
+      signal: ctrl.signal,
+      headers: {
+        ...(opts.body && !(opts.body instanceof FormData) ? { "Content-Type": "application/json" } : {}),
+        ...(token ? { Authorization: "Bearer " + token } : {}),
+        ...(opts.headers || {}),
+      },
+    });
+  } catch (e) {
+    if (ctrl.signal.aborted && !(callerSig && callerSig.aborted)) {
+      throw new Error("Request timed out after " + (timeoutMs / 1000) + "s — the server may still be working. Try again, or wait and refresh.");
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+    if (callerSig && callerSig.removeEventListener) callerSig.removeEventListener("abort", onAbort);
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.detail || res.statusText);
   return data;
