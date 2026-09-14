@@ -3,11 +3,19 @@
 import { h, render } from "https://esm.sh/preact@10.19.3";
 import { useState, useEffect } from "https://esm.sh/preact@10.19.3/hooks";
 import htm from "https://esm.sh/htm@3.1.1";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const html = htm.bind(h);
 const CFG = window.CONFIG;
-const sb = createClient(CFG.supabaseUrl, CFG.supabaseAnonKey);
+
+// ---- local session (self-hosted auth tokens from the API) ----
+const TOKEN_KEY = "urs_token";
+const EMAIL_KEY = "urs_email";
+const getToken = () => localStorage.getItem(TOKEN_KEY);
+const setSession = (token, email) => {
+  localStorage.setItem(TOKEN_KEY, token);
+  localStorage.setItem(EMAIL_KEY, email);
+};
+const clearSession = () => { localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(EMAIL_KEY); };
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const PERIODS = ["8:15-9:05", "9:05-9:55", "10:10-11:00", "11:00-11:50", "11:50-12:40",
@@ -150,36 +158,36 @@ function downloadXlsx(sheets, filename) {
 
 // ---------- app ----------
 function App() {
-  const [session, setSession] = useState(null);
+  const [session, setSession] = useState(null); // { email }
   const [role, setRole] = useState(null);
   const [tab, setTab] = useState("timetable");
   const [uni, setUni] = useState(null);
   const [schedule, setSchedule] = useState(null);
 
   useEffect(() => {
-    sb.auth.getSession().then(({ data }) => {
-      if (data.session) { setSession(data.session); loadMe(data.session.access_token); }
-    });
-    const { data: sub } = sb.auth.onAuthStateChange((_e, s) => {
-      setSession(s);
-      if (s) loadMe(s.access_token); else { setRole(null); }
-    });
-    return () => sub.subscription.unsubscribe();
+    const t = getToken();
+    if (t) loadMe(t);
   }, []);
 
   const loadMe = async (token) => {
     try {
       const me = await api("/api/me", token);
+      setSession({ email: me.email });
       setRole(me.role);
       const u = await api("/api/university", token);
       setUni(u);
       const sch = await api("/api/schedule", token);
       setSchedule(sch.status === "ok" ? sch : null);
-    } catch (e) { setRole("viewer"); }
+    } catch (e) {
+      clearSession();
+      setSession(null);
+      setRole(null);
+    }
   };
 
-  if (!session) return html`<${Login} />`;
-  const token = session.access_token;
+  const signOut = () => { clearSession(); setSession(null); setRole(null); };
+  if (!session) return html`<${Login} onSignedIn=${loadMe} />`;
+  const token = getToken();
   const tabs = [
     ["timetable", "Timetable"],
     ["data", "University data"],
@@ -193,7 +201,7 @@ function App() {
       <nav class="tabs">
         ${tabs.map(([id, label]) => html`<button key=${id} class=${tab === id ? "on" : ""} onClick=${() => setTab(id)}>${label}</button>`)}
       </nav>
-      <span class="who">${session.user.email} · ${role}<br/><a style="color:#d8d4c6" href="#" onClick=${(e) => { e.preventDefault(); sb.auth.signOut(); }}>Sign out</a></span>
+      <span class="who">${session.email} · ${role}<br/><a style="color:#d8d4c6" href="#" onClick=${(e) => { e.preventDefault(); signOut(); }}>Sign out</a></span>
     </header>
     <main>
       ${tab === "timetable" && html`<${Timetable} token=${token} uni=${uni} schedule=${schedule} setSchedule=${setSchedule} role=${role} />`}
@@ -205,7 +213,7 @@ function App() {
   `;
 }
 
-function Login() {
+function Login({ onSignedIn }) {
   const [email, setEmail] = useState("");
   const [pass, setPass] = useState("");
   const [mode, setMode] = useState("signin");
@@ -214,12 +222,19 @@ function Login() {
   const submit = async (e) => {
     e.preventDefault();
     setErr(""); setNote("");
-    const fn = mode === "signin" ? sb.auth.signInWithPassword : sb.auth.signUp;
-    const { error, data } = await fn({ email, password: pass });
-    if (error) { setErr(error.message); return; }
-    if (data.session) {
-      try { await api("/api/claim-coordinator", data.session.access_token); setNote("You are the first user — you are now the Timetable Coordinator."); } catch (_) {}
-    }
+    try {
+      const fd = new FormData();
+      fd.append("email", email);
+      fd.append("password", pass);
+      const res = await fetch(CFG.apiUrl + (mode === "signin" ? "/api/auth/login" : "/api/auth/signup"), { method: "POST", body: fd });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { setErr(data.detail || "Sign in failed"); return; }
+      setSession(data.token, data.user.email);
+      if (mode === "signup") {
+        try { await api("/api/claim-coordinator", data.token); setNote("You are the first user — you are now the Timetable Coordinator."); } catch (_) {}
+      }
+      onSignedIn(data.token);
+    } catch (ex) { setErr(ex.message); }
   };
   return html`
     <div class="card auth">
@@ -446,8 +461,16 @@ function Requests({ token, uni, role }) {
     load();
   };
   const letterUrl = async (id) => {
-    try { const r = await api(`/api/requests/${id}/letter`, token); window.open(r.url, "_blank"); }
-    catch (e) { setErr(e.message); }
+    try {
+      const res = await fetch(`${CFG.apiUrl}/api/requests/${id}/letter`, { headers: { Authorization: "Bearer " + getToken() } });
+      if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.detail || "Download failed"); }
+      const blob = await res.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "request-letter";
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (e) { setErr(e.message); }
   };
   return html`
     ${role !== "coordinator" && html`
@@ -477,7 +500,7 @@ function Requests({ token, uni, role }) {
         <tr><th>When</th>${role === "coordinator" ? html`<th>From</th>` : ""}<th>Section</th><th>Preferred room</th><th>Reason</th><th>Letter</th><th>Status</th>${role === "coordinator" ? html`<th>Decision</th>` : ""}</tr>
         ${list.map((r) => html`<tr key=${r.id}>
           <td>${new Date(r.created_at).toLocaleDateString()}</td>
-          ${role === "coordinator" ? html`<td>${r.profiles?.full_name || r.user_id.slice(0, 8)}</td>` : ""}
+          ${role === "coordinator" ? html`<td>${r.user_name || r.user_email || r.user_id.slice(0, 8)}</td>` : ""}
           <td>${(uni?.sections || []).find((s) => s.id === r.section_id)?.name || r.section_id}</td>
           <td>${(uni?.rooms || []).find((x) => x.id === r.preferred_room)?.name || "—"}</td>
           <td>${r.reason}</td>

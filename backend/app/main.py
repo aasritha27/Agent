@@ -1,22 +1,25 @@
 """University Room Scheduler — backend API.
 
-The browser never generates schedules. It logs in via Supabase Auth, calls
-these endpoints, and displays what comes back. All scheduling runs here
-through the CP-SAT solver; all data lives in Supabase Postgres.
+The browser never generates schedules. It signs in against these endpoints
+(self-hosted auth, SQLite storage), calls the API with the returned token,
+and displays what comes back. All scheduling runs here through the CP-SAT
+solver; all data lives in one SQLite database file. No external services.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Optional
+import os
+import secrets
+import uuid
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from . import db, importer
-from .auth import current_user, require_coordinator, require_user
-from .config import ALLOWED_ORIGINS
-from .config import LETTERS_BUCKET
+from .auth import create_token, current_user, hash_password, require_coordinator, require_user, verify_password
+from .config import ALLOWED_ORIGINS, LETTERS_DIR
 from .solver import solve_timetable
 
 app = FastAPI(title="University Room Scheduler API")
@@ -30,9 +33,73 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+def startup():
+    db.init()
+    _autoseed_if_empty()
+
+
+def _autoseed_if_empty():
+    """A fresh database boots with the bundled department data preloaded."""
+    uni = db.load_university()
+    if uni["sections"] or uni["faculty"]:
+        return
+    seed_path = os.path.join(os.path.dirname(__file__), "..", "seed", "university_data.json")
+    seed_data = json.load(open(seed_path))
+    db.upsert("faculty", [
+        {"id": f["id"], "name": f["name"], "max_per_day": f.get("maxPerDay", 4)}
+        for f in seed_data["faculty"]], key="id")
+    db.upsert("rooms", [
+        {"id": r["id"], "name": r["name"], "capacity": r["capacity"], "type": r["type"]}
+        for r in seed_data["rooms"]], key="id")
+    db.upsert("sections", [
+        {"id": s["id"], "name": s["name"], "students": s["students"]}
+        for s in seed_data["sections"]], key="id")
+    subjects, links = {}, []
+    for g in seed_data["courseSections"]:
+        subjects[g["id"]] = {"id": g["id"], "code": g["code"], "name": g["name"]}
+        links.append({
+            "section_id": g["sectionId"], "subject_id": g["id"],
+            "faculty_id": g["facultyId"],
+            "lecture_hours": g.get("lectureHours", 3),
+            "practical_hours": g.get("practicalHours", 2),
+        })
+    db.upsert("subjects", list(subjects.values()), key="id")
+    db.upsert("section_subjects", links, key="section_id,subject_id")
+
+
 @app.get("/api/health")
 def health():
-    return {"ok": True}
+    try:
+        uni = db.load_university()
+        counts = {"faculty": len(uni["faculty"]), "rooms": len(uni["rooms"]),
+                  "sections": len(uni["sections"]), "subjects": len(uni["subjects"])}
+    except Exception:
+        counts = {}
+    return {"ok": True, "data": counts}
+
+
+# ---- auth ------------------------------------------------------------------
+
+@app.post("/api/auth/signup")
+def auth_signup(email: str = Form(...), password: str = Form(...),
+                full_name: str = Form("")):
+    if "@" not in email or len(password) < 6:
+        raise HTTPException(400, "Valid email and a password of at least 6 characters required")
+    if db.get_user_by_email(email):
+        raise HTTPException(400, "An account with this email already exists")
+    user_id = str(uuid.uuid4())
+    db.create_user(user_id, email, hash_password(password), full_name)
+    return {"token": create_token(user_id, email.strip().lower()), "user": {"id": user_id, "email": email.strip().lower(), "role": "viewer"}}
+
+
+@app.post("/api/auth/login")
+def auth_login(email: str = Form(...), password: str = Form(...)):
+    user = db.get_user_by_email(email)
+    if not user or not verify_password(password, user["password_hash"]):
+        raise HTTPException(401, "Invalid email or password")
+    return {"token": create_token(user["id"], user["email"]),
+            "user": {"id": user["id"], "email": user["email"], "role": user["role"]}}
 
 
 @app.get("/api/me")
@@ -59,6 +126,8 @@ def promote_by_id(user_id: str, role: str = Form("viewer"),
     return {"id": user_id, "role": role}
 
 
+# ---- university data -------------------------------------------------------
+
 @app.get("/api/university")
 def university(user: dict = Depends(require_user)):
     return db.load_university()
@@ -78,19 +147,15 @@ async def import_data(kind: str, file: UploadFile = File(...),
 def seed(_: dict = Depends(require_coordinator)):
     """Load the bundled department data (34 sections, 34 rooms, 102 faculty)."""
     seed_data = json.load(open("seed/university_data.json"))
-    sb = db.client()
-    sb.table("faculty").upsert(
-        [{"id": f["id"], "name": f["name"], "max_per_day": f.get("maxPerDay", 4)}
-         for f in seed_data["faculty"]]
-    ).execute()
-    sb.table("rooms").upsert(
-        [{"id": r["id"], "name": r["name"], "capacity": r["capacity"], "type": r["type"]}
-         for r in seed_data["rooms"]]
-    ).execute()
-    sb.table("sections").upsert(
-        [{"id": s["id"], "name": s["name"], "students": s["students"]}
-         for s in seed_data["sections"]]
-    ).execute()
+    db.upsert("faculty", [
+        {"id": f["id"], "name": f["name"], "max_per_day": f.get("maxPerDay", 4)}
+        for f in seed_data["faculty"]], key="id")
+    db.upsert("rooms", [
+        {"id": r["id"], "name": r["name"], "capacity": r["capacity"], "type": r["type"]}
+        for r in seed_data["rooms"]], key="id")
+    db.upsert("sections", [
+        {"id": s["id"], "name": s["name"], "students": s["students"]}
+        for s in seed_data["sections"]], key="id")
     subjects, links = {}, []
     for g in seed_data["courseSections"]:
         subjects[g["id"]] = {"id": g["id"], "code": g["code"], "name": g["name"]}
@@ -100,14 +165,16 @@ def seed(_: dict = Depends(require_coordinator)):
             "lecture_hours": g.get("lectureHours", 3),
             "practical_hours": g.get("practicalHours", 2),
         })
-    sb.table("subjects").upsert(list(subjects.values())).execute()
-    sb.table("section_subjects").upsert(links).execute()
+    db.upsert("subjects", list(subjects.values()), key="id")
+    db.upsert("section_subjects", links, key="section_id,subject_id")
     counts = {k: len(v) for k, v in {
         "faculty": seed_data["faculty"], "rooms": seed_data["rooms"],
         "sections": seed_data["sections"], "subjects": list(subjects.values()),
         "assignments": links}.items()}
     return {"seeded": counts}
 
+
+# ---- scheduling ------------------------------------------------------------
 
 @app.post("/api/solve")
 def solve(_: dict = Depends(require_coordinator)):
@@ -119,80 +186,72 @@ def solve(_: dict = Depends(require_coordinator)):
     if result["status"] != "ok":
         return result  # infeasible / unknown, with a human-readable detail
 
-    sb = db.client()
-    sb.table("schedules").update({"status": "archived"}).eq("status", "active").execute()
-    row = sb.table("schedules").insert({
-        "status": "active",
-        "sessions": result["sessions"],
-        "stats": result["stats"],
-    }).execute()
-    return {"status": "ok", "scheduleId": row.data[0]["id"], "stats": result["stats"]}
+    db.archive_schedules()
+    schedule_id = db.insert_schedule(result["sessions"], result["stats"])
+    return {"status": "ok", "scheduleId": schedule_id, "stats": result["stats"]}
 
 
 @app.get("/api/schedule")
 def schedule(user: dict = Depends(require_user)):
-    row = (db.client().table("schedules").select("*").eq("status", "active")
-           .order("created_at", desc=True).limit(1).execute())
-    if not row.data:
+    row = db.active_schedule()
+    if not row:
         return {"status": "empty"}
-    return {"status": "ok", "scheduleId": row.data[0]["id"],
-            "createdAt": row.data[0]["created_at"],
-            "stats": row.data[0].get("stats"), "sessions": row.data[0]["sessions"]}
+    return {"status": "ok", "scheduleId": row["id"],
+            "createdAt": row["createdAt"], "stats": row["stats"],
+            "sessions": row["sessions"]}
 
 
 # ---- room requests ---------------------------------------------------------
+
+def _letter_file_path(stored_name: str) -> str:
+    return os.path.join(LETTERS_DIR, stored_name)
+
 
 @app.post("/api/requests")
 async def create_request(section_id: str = Form(...),
                          preferred_room: str = Form(""),
                          reason: str = Form(...),
-                         letter: Optional[UploadFile] = File(None),
+                         letter: UploadFile | None = File(None),
                          user: dict = Depends(require_user)):
     letter_path = None
     if letter and letter.filename:
-        letter_path = f"{user['id']}/{letter.filename}"
-        db.client().storage.from_(LETTERS_BUCKET).upload(
-            letter_path, await letter.read(),
-            {"content-type": letter.content_type or "application/octet-stream",
-             "upsert": "true"})
-    row = db.client().table("room_requests").insert({
-        "user_id": user["id"], "section_id": section_id,
-        "preferred_room": preferred_room or None, "reason": reason,
-        "letter_path": letter_path, "status": "pending",
-    }).execute()
-    return {"id": row.data[0]["id"]}
+        os.makedirs(LETTERS_DIR, exist_ok=True)
+        safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in letter.filename)
+        stored_name = f"{user['id'][:8]}-{secrets.token_hex(6)}-{safe}"
+        with open(_letter_file_path(stored_name), "wb") as fh:
+            fh.write(await letter.read())
+        letter_path = stored_name
+    request_id = db.insert_request(user["id"], section_id,
+                                   preferred_room or None, reason, letter_path)
+    return {"id": request_id}
 
 
 @app.get("/api/requests")
 def list_requests(user: dict = Depends(require_user)):
-    q = db.client().table("room_requests").select(
-        "id, user_id, section_id, preferred_room, reason, letter_path, status, "
-        "created_at, profiles(full_name)"
-    )
-    rows = (q.execute().data if user["role"] == "coordinator"
-            else q.eq("user_id", user["id"]).execute().data)
-    return {"requests": rows or []}
+    rows = (db.list_requests() if user["role"] == "coordinator"
+            else db.list_requests(user_id=user["id"]))
+    return {"requests": rows}
 
 
 @app.get("/api/requests/{request_id}/letter")
-def request_letter(request_id: str, user: dict = Depends(require_user)):
-    row = (db.client().table("room_requests").select("letter_path, user_id")
-           .eq("id", request_id).single().execute())
-    if not row.data or not row.data["letter_path"]:
+def request_letter(request_id: int, user: dict = Depends(require_user)):
+    row = db.get_request(request_id)
+    if not row or not row["letter_path"]:
         raise HTTPException(404, "No letter attached")
-    if user["role"] != "coordinator" and row.data["user_id"] != user["id"]:
+    if user["role"] != "coordinator" and row["user_id"] != user["id"]:
         raise HTTPException(403, "Not your request")
-    url = db.client().storage.from_(LETTERS_BUCKET).create_signed_url(
-        row.data["letter_path"], 600)
-    return {"url": url.get("signedURL") or url.get("signedUrl")}
+    path = _letter_file_path(row["letter_path"])
+    if not os.path.exists(path):
+        raise HTTPException(404, "Letter file missing")
+    return FileResponse(path, filename=row["letter_path"].split("-", 2)[-1])
 
 
 @app.post("/api/requests/{request_id}/decision")
-def decide(request_id: str, status: str = Form(...),
-           _: dict = Depends(require_coordinator)):
+def decide(request_id: int, status: str = Form(...),
+           user: dict = Depends(require_coordinator)):
     if status not in ("approved", "rejected"):
         raise HTTPException(400, "Decision must be approved or rejected")
-    db.client().table("room_requests").update({
-        "status": status, "decided_by": _["id"], "decided_at": "now()",
-    }).eq("id", request_id).execute()
+    if not db.get_request(request_id):
+        raise HTTPException(404, "Request not found")
+    db.decide_request(request_id, status, user["id"])
     return {"id": request_id, "status": status}
