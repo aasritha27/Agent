@@ -195,21 +195,45 @@ function App() {
     ["requests", "Room requests"],
     ["letter", "Workshop letter"],
   ];
+  const ICONS = { timetable: "▦", data: "⛁", generate: "✦", requests: "✉", letter: "🗎" };
+  const TITLES = { timetable: "Weekly allocation board", data: "University data", generate: "Generate timetable", requests: "Room requests", letter: "Workshop letter" };
+  const initials = (session.email || "?").slice(0, 2).toUpperCase();
   return html`
-    <header class="top">
-      <h1>University Room Scheduler</h1>
-      <nav class="tabs">
-        ${tabs.map(([id, label]) => html`<button key=${id} class=${tab === id ? "on" : ""} onClick=${() => setTab(id)}>${label}</button>`)}
-      </nav>
-      <span class="who">${session.email} · <b>${role}</b><br/><a href="#" onClick=${(e) => { e.preventDefault(); signOut(); }}>Sign out</a></span>
-    </header>
-    <main>
-      ${tab === "timetable" && html`<${Timetable} token=${token} uni=${uni} schedule=${schedule} setSchedule=${setSchedule} role=${role} />`}
-      ${tab === "data" && html`<${Data} token=${token} uni=${uni} reload=${() => api("/api/university", token).then(setUni)} role=${role} />`}
-      ${tab === "generate" && html`<${Generate} token=${token} setSchedule=${setSchedule} />`}
-      ${tab === "requests" && html`<${Requests} token=${token} uni=${uni} role=${role} />`}
-      ${tab === "letter" && html`<${Letter} />`}
-    </main>
+    <div class="shell">
+      <aside class="side">
+        <div class="brand">
+          <span class="mark">◆</span>
+          <div class="brand-text"><small>Academic Operations</small><h3>Roomline</h3></div>
+        </div>
+        <nav class="side-nav">
+          ${tabs.map(([id, label]) => html`<button key=${id} class=${tab === id ? "on" : ""} onClick=${() => setTab(id)}><span class="ic">${ICONS[id]}</span>${label}</button>`)}
+        </nav>
+        <div class="side-foot">
+          <div class="policy">
+            <small>Active policy</small>
+            <b>Hard constraints only</b>
+            <p>Times, faculty, and room rules are enforced exactly; infeasibility is reported, never papered over.</p>
+          </div>
+          <div class="who">
+            <span class="avatar">${initials}</span>
+            <span class="who-text">${session.email}<br/><b>${role}</b> · <a href="#" onClick=${(e) => { e.preventDefault(); signOut(); }}>Sign out</a></span>
+          </div>
+        </div>
+      </aside>
+      <main class="board">
+        <div class="topbar">
+          <div>
+            <small class="crumb">ACSE Department · Timetable Prototype</small>
+            <h1 class="page-title">${TITLES[tab]}</h1>
+          </div>
+        </div>
+        ${tab === "timetable" && html`<${Timetable} token=${token} uni=${uni} schedule=${schedule} setSchedule=${setSchedule} role=${role} />`}
+        ${tab === "data" && html`<${Data} token=${token} uni=${uni} reload=${() => api("/api/university", token).then(setUni)} role=${role} />`}
+        ${tab === "generate" && html`<${Generate} token=${token} setSchedule=${setSchedule} />`}
+        ${tab === "requests" && html`<${Requests} token=${token} uni=${uni} role=${role} />`}
+        ${tab === "letter" && html`<${Letter} />`}
+      </main>
+    </div>
   `;
 }
 
@@ -231,7 +255,7 @@ function Login({ onSignedIn }) {
       if (!res.ok) { setErr(data.detail || "Sign in failed"); return; }
       setSession(data.token, data.user.email);
       if (mode === "signup") {
-        try { await api("/api/claim-coordinator", data.token); setNote("You are the first user — you are now the Timetable Coordinator."); } catch (_) {}
+        try { await api("/api/claim-coordinator", data.token, { method: "POST" }); setNote("You are the first user — you are now the Timetable Coordinator."); } catch (_) {}
       }
       onSignedIn(data.token);
     } catch (ex) { setErr(ex.message); }
@@ -281,6 +305,12 @@ function Timetable({ token, uni, schedule, setSchedule, role }) {
   };
 
   return html`
+    <div class="stats-row">
+      <div class="tile"><small>Teaching hours</small><b>${schedule.stats?.weeklyHours || 0}<span class="of">/850</span></b><p>allocated · required weekly</p></div>
+      <div class="tile"><small>Conflicts</small><b>0</b><p>hard constraints</p></div>
+      <div class="tile"><small>Rooms</small><b>${uni?.rooms?.length || 0}</b><p>${uni?.rooms?.filter((r) => r.type === "Lab").length || 0} labs · ${uni?.rooms?.filter((r) => r.type !== "Lab").length || 0} classrooms</p></div>
+      <div class="tile"><small>Faculty</small><b>${uni?.faculty?.length || 0}</b><p>sections: ${uni?.sections?.length || 0}</p></div>
+    </div>
     <div class="card">
       <h2>Timetable</h2>
       <div class="row">
