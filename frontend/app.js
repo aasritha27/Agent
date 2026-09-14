@@ -201,7 +201,7 @@ function App() {
       <nav class="tabs">
         ${tabs.map(([id, label]) => html`<button key=${id} class=${tab === id ? "on" : ""} onClick=${() => setTab(id)}>${label}</button>`)}
       </nav>
-      <span class="who">${session.email} · ${role}<br/><a style="color:#d8d4c6" href="#" onClick=${(e) => { e.preventDefault(); signOut(); }}>Sign out</a></span>
+      <span class="who">${session.email} · <b>${role}</b><br/><a href="#" onClick=${(e) => { e.preventDefault(); signOut(); }}>Sign out</a></span>
     </header>
     <main>
       ${tab === "timetable" && html`<${Timetable} token=${token} uni=${uni} schedule=${schedule} setSchedule=${setSchedule} role=${role} />`}
@@ -321,6 +321,7 @@ function buildGrid(mode, ent, uni, schedule) {
   const roomById = Object.fromEntries(uni.rooms.map((r) => [r.id, r]));
   const secById = Object.fromEntries(uni.sections.map((s) => [s.id, s]));
   const cells = DAYS.map(() => Array(PERIODS.length).fill(""));
+  const tones = DAYS.map(() => Array(PERIODS.length).fill(""));
   for (const sess of schedule.sessions) {
     const match =
       (mode === "section" && sess.sectionId === ent.id) ||
@@ -337,10 +338,19 @@ function buildGrid(mode, ent, uni, schedule) {
       if (mode !== "faculty") line += "\n" + (facById[sess.facultyId]?.name || "");
       if (mode !== "room") line += "\n" + (roomById[sess.roomId]?.name || sess.roomId);
       if (mode !== "section") line += "\n" + (secById[sess.sectionId]?.name || "");
-      cells[d][p] = line;
+      const toneKey = sub ? sub.subject_id : sess.courseId;
+      let h = 0;
+      for (let i = 0; i < toneKey.length; i++) h = (h * 31 + toneKey.charCodeAt(i)) >>> 0;
+      const tone = "tone" + (h % 8);
+      for (let w = 0; w < sess.duration; w++) {
+        const d = DAYS.indexOf(sess.day), p = sess.slot + w;
+        if (d < 0 || p >= PERIODS.length) continue;
+        tones[d][p] = tone;
+        cells[d][p] = line;
+      }
     }
   }
-  return { cells, isPrac: cells.map((row, d) => row.map((c, p) => schedule.sessions.some((s) => s.duration === 2 && DAYS[d] === s.day && s.slot === p))) };
+  return { cells, tones, isPrac: cells.map((row, d) => row.map((c, p) => schedule.sessions.some((s) => s.duration === 2 && DAYS[d] === s.day && s.slot === p))) };
 }
 
 function GridTable({ grid }) {
@@ -350,7 +360,7 @@ function GridTable({ grid }) {
     if (BREAK_AFTER[p]) body.push(html`<tr key=${"b" + p}><td class="brk" colspan="2">🞄</td><td class="brk" colspan="6">${BREAK_AFTER[p]}</td></tr>`);
     body.push(html`<tr key=${p}>
       <th>${"P" + (p + 1)}<br/><small>${PERIODS[p]}</small></th>
-      ${DAYS.map((d, di) => html`<td key=${d} class=${"cell" + (grid.isPrac[di][p] ? " prac" : "")}>${grid.cells[di][p] ? grid.cells[di][p].split("\n").map((l, i) => i === 0 ? html`<b>${l}</b>` : html`<small>${l}<br/></small>`) : ""}</td>`)}
+      ${DAYS.map((d, di) => html`<td key=${d} class=${"cell " + (grid.tones[di][p] || "tone-empty") + (grid.isPrac[di][p] ? " prac" : "")}>${grid.cells[di][p] ? grid.cells[di][p].split("\n").map((l, i) => i === 0 ? html`<b>${l}</b>` : html`<small>${l}<br/></small>`) : ""}</td>`)}
     </tr>`);
   }
   return html`<table class="grid">${head}${body}</table>`;
