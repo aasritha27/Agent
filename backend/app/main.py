@@ -13,11 +13,12 @@ import os
 import secrets
 import uuid
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from . import db, importer
+from .agent import chat as agent_chat
 from .auth import create_token, current_user, hash_password, require_coordinator, require_user, verify_password
 from .config import ALLOWED_ORIGINS, LETTERS_DIR
 from .solver import solve_timetable
@@ -199,6 +200,19 @@ def schedule(user: dict = Depends(require_user)):
     return {"status": "ok", "scheduleId": row["id"],
             "createdAt": row["createdAt"], "stats": row["stats"],
             "sessions": row["sessions"]}
+
+
+# ---- AI assistant ----------------------------------------------------------
+
+@app.post("/api/chat")
+def chat_route(body: dict = Body(...), user: dict = Depends(require_user)):
+    message = str(body.get("message", "")).strip()
+    if not message:
+        raise HTTPException(400, "Message required")
+    result = agent_chat(message, body.get("history") or [], user)
+    if "error" in result:
+        raise HTTPException(502, result["error"])
+    return result
 
 
 # ---- room requests ---------------------------------------------------------

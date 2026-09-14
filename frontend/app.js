@@ -194,9 +194,10 @@ function App() {
     ...(role === "coordinator" ? [["generate", "Generate"]] : []),
     ["requests", "Room requests"],
     ["letter", "Workshop letter"],
+    ["askai", "Ask AI"],
   ];
-  const ICONS = { timetable: "▦", data: "⛁", generate: "✦", requests: "✉", letter: "🗎" };
-  const TITLES = { timetable: "Weekly allocation board", data: "University data", generate: "Generate timetable", requests: "Room requests", letter: "Workshop letter" };
+  const ICONS = { timetable: "▦", data: "⛁", generate: "✦", requests: "✉", letter: "🗎", askai: "✳" };
+  const TITLES = { timetable: "Weekly allocation board", data: "University data", generate: "Generate timetable", requests: "Room requests", letter: "Workshop letter", askai: "Ask Roomline" };
   const initials = (session.email || "?").slice(0, 2).toUpperCase();
   return html`
     <div class="shell">
@@ -232,6 +233,7 @@ function App() {
         ${tab === "generate" && html`<${Generate} token=${token} setSchedule=${setSchedule} />`}
         ${tab === "requests" && html`<${Requests} token=${token} uni=${uni} role=${role} />`}
         ${tab === "letter" && html`<${Letter} />`}
+        ${tab === "askai" && html`<${AskAI} token=${token} role=${role} />`}
       </main>
     </div>
   `;
@@ -588,6 +590,51 @@ ${f.dept || "Department of Computer Science"}`;
       </div>
       <textarea readOnly rows="18" style="font-family:Georgia,serif;white-space:pre-wrap">${text}</textarea>
       <button class="subtle" style="margin-top:8px" onClick=${() => navigator.clipboard.writeText(text)}>Copy letter</button>
+    </div>`;
+}
+
+function AskAI({ token, role }) {
+  const [msgs, setMsgs] = useState([]);
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const endRef = (el) => { if (el) el.scrollIntoView({ behavior: "smooth" }); };
+
+  const send = async (text) => {
+    const message = (text || input).trim();
+    if (!message || busy) return;
+    setErr(""); setInput(""); setBusy(true);
+    const history = msgs.map((m) => ({ role: m.who === "ai" ? "model" : "user", text: m.text }));
+    setMsgs((m) => [...m, { who: "you", text: message }]);
+    try {
+      const res = await fetch(CFG.apiUrl + "/api/chat", { method: "POST", headers: { Authorization: "Bearer " + getToken(), "Content-Type": "application/json" }, body: JSON.stringify({ message, history }) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || "The assistant is unavailable right now");
+      setMsgs((m) => [...m, { who: "ai", text: data.reply }]);
+    } catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+
+  const examples = role === "coordinator"
+    ? ["How many faculty teach more than 3 periods on Monday?", "Show me AI&ML Year 2 Section A's timetable", "Which rooms are free on Wednesday P3?"]
+    : ["Show me my section's timetable", "Which faculty teach the most on Monday?", "How many practicals are scheduled this week?"];
+
+  return html`
+    <div class="chatwrap">
+      <div class="chatlog">
+        ${!msgs.length && html`<div class="chat-hello card"><h2>Ask Roomline</h2>
+          <p class="statline">I can read the live timetable, the university data, and ${role === "coordinator" ? "edit data and regenerate the schedule for you" : "answer questions (edits and generation are coordinator-only)"}.</p>
+          <div class="row" style="margin-top:10px">${examples.map((x) => html`<button class="chip" key=${x} onClick=${() => send(x)}>${x}</button>`)}</div>
+        </div>`}
+        ${msgs.map((m, i) => html`<div key=${i} class=${"bubble " + (m.who === "ai" ? "ai" : "you")}>${m.text}</div>`)}
+        ${busy && html`<div class="bubble ai thinking">Working on it…</div>`}
+        <div ref=${endRef}></div>
+      </div>
+      ${err && html`<div class="msg err">${err}</div>`}
+      <form class="chatbar" onSubmit=${(e) => { e.preventDefault(); send(); }}>
+        <input placeholder="Ask about the timetable, rooms, faculty…" value=${input} onInput=${(e) => setInput(e.target.value)} />
+        <button class="primary" disabled=${busy}>Send</button>
+      </form>
     </div>`;
 }
 
